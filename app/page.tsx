@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 type WalletKey = "Operating" | "Yield" | "Payment";
-
 type ConnectionMode = "NotConnected" | "DemoBankFeed" | "Wallet";
 
 type TreasuryEvent =
@@ -71,38 +70,12 @@ function StepPill({ active, children }: { active: boolean; children: React.React
   );
 }
 
-function StepTag({ stepLabel }: { stepLabel: string }) {
-  return <span className="text-xs rounded-full bg-muted px-2 py-1 text-muted-foreground">{stepLabel}</span>;
-}
-
-function SpotlightCard({
-  active,
-  titleRight,
-  children,
-}: {
-  active: boolean;
-  titleRight?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <Card
-      className={[
-        "rounded-2xl shadow-sm transition",
-        active ? "ring-2 ring-black" : "",
-      ].join(" ")}
-    >
-      <CardContent className="p-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">{children}</div>
-          {titleRight ? <div className="shrink-0">{titleRight}</div> : null}
-        </div>
-      </CardContent>
-    </Card>
-  );
+function StepTag({ label }: { label: string }) {
+  return <span className="text-xs rounded-full bg-muted px-2 py-1 text-muted-foreground">{label}</span>;
 }
 
 export default function TreasuryDashboard() {
-  // Balances (defaults)
+  // Balances
   const [balances, setBalances] = useState<Record<WalletKey, number>>({
     Operating: 50000,
     Yield: 250000,
@@ -112,24 +85,23 @@ export default function TreasuryDashboard() {
   // Policy inputs
   const [operatingTarget, setOperatingTarget] = useState<number>(50000);
 
-  // Bank baseline vs on-chain target (for “delta”)
+  // Bank baseline vs on-chain target
   const [bankApyPct, setBankApyPct] = useState<number>(0.2);
   const [onchainApyPct, setOnchainApyPct] = useState<number>(5.0);
 
   // Simulation window
   const [months, setMonths] = useState<number>(6);
 
-  // Guided demo
+  // Guided demo state
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("NotConnected");
 
-  // Approval gate
+  // Approval gate (applies to ALL sweeps)
   const [requiresApproval, setRequiresApproval] = useState<boolean>(true);
   const [approved, setApproved] = useState<boolean>(false);
 
   // Audit trail
   const [events, setEvents] = useState<TreasuryEvent[]>([]);
-
   const [lastSweep, setLastSweep] = useState<{ sweptAmount: number; timestamp: number; path: "Guided" | "Quick" } | null>(
     null
   );
@@ -155,7 +127,7 @@ export default function TreasuryDashboard() {
 
   const monthlyUplift = useMemo(() => annualUplift / 12, [annualUplift]);
 
-  // Analyze recommendation (v1: sweep excess Operating into Yield)
+  // Step 2 output (analysis)
   const recommendation = useMemo(() => {
     const sweepAmount = excessOperating;
     const rationale =
@@ -165,7 +137,7 @@ export default function TreasuryDashboard() {
     return { sweepAmount, rationale };
   }, [excessOperating]);
 
-  // Chart data: bank vs on-chain cumulative yield over N months (simple, non-compounding)
+  // Step 4 output (chart)
   const yieldSimulation = useMemo(() => {
     const m = clampNumber(months, 1, 24);
     const principal = clampNumber(balances.Yield, 0);
@@ -182,25 +154,13 @@ export default function TreasuryDashboard() {
     });
   }, [balances.Yield, onchainMonthlyRate, bankMonthlyRate, months]);
 
-  // Step gating (applies to Next + guided actions)
+  // Gating for Next button
   const canContinue = useMemo(() => {
     if (step === 1) return connectionMode !== "NotConnected";
     if (step === 2) return true;
     if (step === 3) return requiresApproval ? approved : true;
     return true;
   }, [step, connectionMode, requiresApproval, approved]);
-
-  // Spotlight mapping: guided step highlights the real feature sections
-  const spotlight = useMemo(() => {
-    return {
-      connect: step === 1,
-      inputs: step === 2,
-      analyze: step === 2,
-      allocate: step === 3,
-      chart: step === 4,
-      monitor: step === 4,
-    };
-  }, [step]);
 
   const logPolicyUpdate = (
     note: string,
@@ -222,10 +182,7 @@ export default function TreasuryDashboard() {
 
   const onChangeBalance = (key: WalletKey, raw: string) => {
     const next = clampNumber(parseCurrencyInput(raw), 0);
-    setBalances((prev) => {
-      const updated = { ...prev, [key]: next };
-      return updated;
-    });
+    setBalances((prev) => ({ ...prev, [key]: next }));
     logBalanceUpdate(key, next);
   };
 
@@ -236,17 +193,11 @@ export default function TreasuryDashboard() {
   };
 
   const canExecuteSweep = useMemo(() => {
-    // Connection is always required
     if (connectionMode === "NotConnected") return false;
-
-    // If approval is enabled, require approval for ANY sweep execution (guided or quick)
-    if (requiresApproval && !approved) return false;
-
-    // Must have positive recommendation
     if (recommendation.sweepAmount <= 0) return false;
-
+    if (requiresApproval && !approved) return false;
     return true;
-  }, [connectionMode, requiresApproval, approved, recommendation.sweepAmount]);
+  }, [connectionMode, recommendation.sweepAmount, requiresApproval, approved]);
 
   const executeSweep = (path: "Guided" | "Quick") => {
     if (!canExecuteSweep) return;
@@ -263,25 +214,8 @@ export default function TreasuryDashboard() {
     setLastSweep({ sweptAmount: sweep, timestamp: ts, path });
     setEvents((prev) => [{ type: "SWEEP_EXECUTED", ts, amount: sweep, path }, ...prev]);
 
-    // reset approval after a “transaction”
     setApproved(false);
-
-    // Guided flow advances to Monitor; quick sweep nudges toward Monitor as well
     setStep(4);
-  };
-
-  const loadDemoScenario = () => {
-    setBalances({ Operating: 80000, Yield: 320000, Payment: 15000 });
-    setOperatingTarget(60000);
-    setBankApyPct(0.2);
-    setOnchainApyPct(5.0);
-    setMonths(6);
-    setConnectionMode("NotConnected");
-    setRequiresApproval(true);
-    setApproved(false);
-    setEvents([]);
-    setLastSweep(null);
-    setStep(1);
   };
 
   const exportAudit = () => {
@@ -306,7 +240,7 @@ export default function TreasuryDashboard() {
 
   return (
     <main className="p-6 md:p-10 space-y-8 max-w-6xl mx-auto">
-      {/* HERO */}
+      {/* HERO / NAV */}
       <section className="space-y-3">
         <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
           <div>
@@ -315,14 +249,11 @@ export default function TreasuryDashboard() {
               Earn more on idle cash · Automate treasury policies · Keep an audit trail
             </p>
             <p className="text-sm text-muted-foreground mt-2">
-              Interactive portfolio demo: adjust inputs, follow the guided flow, and export an audit log.
+              Scroll down to progress through the guided flow (Steps 1–4). Everything stays interactive and updates live.
             </p>
           </div>
 
           <div className="flex gap-2">
-            <Button variant="outline" onClick={loadDemoScenario}>
-              Load Demo Scenario
-            </Button>
             <Button onClick={() => setStep(1)}>Start Guided Demo</Button>
           </div>
         </div>
@@ -348,60 +279,66 @@ export default function TreasuryDashboard() {
         </div>
       </section>
 
-      {/* CONNECT (spotlight) */}
-      <SpotlightCard
-        active={spotlight.connect}
-        titleRight={<StepTag stepLabel="Guided Step 1" />}
-      >
-        <div className="space-y-3">
-          <h2 className="text-lg font-semibold">Connect</h2>
-          <p className="text-sm text-muted-foreground">
-            Select a connection mode. Actions are disabled until connected to mirror real treasury permissions.
-          </p>
-
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant={connectionMode === "DemoBankFeed" ? "default" : "outline"}
-              onClick={() => connect("DemoBankFeed")}
-            >
-              Connect Demo Bank Feed
-            </Button>
-            <Button
-              variant={connectionMode === "Wallet" ? "default" : "outline"}
-              onClick={() => connect("Wallet")}
-            >
-              Connect Wallet
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => setConnectionMode("NotConnected")}
-              disabled={connectionMode === "NotConnected"}
-            >
-              Disconnect
-            </Button>
-          </div>
-
-          <div className="rounded-2xl border p-4 text-sm">
-            <span className="text-muted-foreground">Status: </span>
-            <span className="font-semibold">{connectionMode}</span>
-            <span className="text-muted-foreground">
-              {connectionMode === "NotConnected"
-                ? " — connect to enable allocations"
-                : " — allocations enabled"}
-            </span>
-          </div>
-        </div>
-      </SpotlightCard>
-
-      {/* SNAPSHOT (always valuable; reacts to inputs + policy) */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className="rounded-2xl shadow-sm lg:col-span-2">
+      {/* STEP 1: CONNECT */}
+      <section>
+        <Card className={["rounded-2xl shadow-sm", step === 1 ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6 space-y-4">
             <div className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Treasury Snapshot</h2>
-              <StepTag stepLabel={step <= 2 ? "Driven by Analyze" : "Live metrics"} />
+              <h2 className="text-lg font-semibold">Step 1 — Connect</h2>
+              <StepTag label="Guided" />
             </div>
 
+            <p className="text-sm text-muted-foreground">
+              Choose a connection mode. Allocations are disabled until connected to mirror real treasury permissions.
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant={connectionMode === "DemoBankFeed" ? "default" : "outline"}
+                onClick={() => connect("DemoBankFeed")}
+              >
+                Connect Demo Bank Feed
+              </Button>
+              <Button
+                variant={connectionMode === "Wallet" ? "default" : "outline"}
+                onClick={() => connect("Wallet")}
+              >
+                Connect Wallet
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => setConnectionMode("NotConnected")}
+                disabled={connectionMode === "NotConnected"}
+              >
+                Disconnect
+              </Button>
+            </div>
+
+            <div className="rounded-2xl border p-4 text-sm">
+              <span className="text-muted-foreground">Status: </span>
+              <span className="font-semibold">{connectionMode}</span>
+              <span className="text-muted-foreground">
+                {connectionMode === "NotConnected" ? " — connect to enable allocations" : " — allocations enabled"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* STEP 2: ANALYZE (inputs + snapshot + recommendation) */}
+      <section className="space-y-6">
+        <Card className={["rounded-2xl shadow-sm", step === 2 ? "ring-2 ring-black" : ""].join(" ")}>
+          <CardContent className="p-6 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Step 2 — Analyze</h2>
+              <StepTag label="Guided" />
+            </div>
+
+            <p className="text-sm text-muted-foreground">
+              Adjust balances, targets, and rates. The system recomputes idle cash and the recommended sweep in real time.
+            </p>
+
+            {/* Snapshot */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="rounded-2xl border p-4">
                 <p className="text-xs text-muted-foreground">Total cash</p>
@@ -412,7 +349,7 @@ export default function TreasuryDashboard() {
               <div className="rounded-2xl border p-4">
                 <p className="text-xs text-muted-foreground">Yield principal</p>
                 <p className="text-2xl font-semibold mt-1">${formatUSD(balances.Yield)}</p>
-                <p className="text-xs text-muted-foreground mt-1">Basis for uplift & chart</p>
+                <p className="text-xs text-muted-foreground mt-1">Basis for delta simulation</p>
               </div>
 
               <div className="rounded-2xl border p-4">
@@ -424,215 +361,255 @@ export default function TreasuryDashboard() {
               </div>
             </div>
 
-            <div className="rounded-2xl bg-muted p-4 text-sm text-muted-foreground">
-              Adjust balances, targets, and rates — the snapshot, analysis, chart, and allocation recommendation update instantly.
-            </div>
-          </CardContent>
-        </Card>
+            {/* Inputs */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 pt-2">
+              <div className="lg:col-span-2 space-y-3">
+                <h3 className="text-sm font-semibold text-muted-foreground">Account Inputs</h3>
 
-        {/* Rates & approval (directly affects allocation everywhere) */}
-        <Card className={["rounded-2xl shadow-sm", spotlight.inputs ? "ring-2 ring-black" : ""].join(" ")}>
-          <CardContent className="p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Rates & Controls</h2>
-              <StepTag stepLabel="Guided Step 2–3" />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Bank baseline APY</label>
-              <div className="flex items-center gap-2">
-                <input
-                  className="w-full rounded-xl border px-3 py-2 text-sm"
-                  inputMode="decimal"
-                  value={bankApyPct.toString()}
-                  onChange={(e) => {
-                    const next = clampNumber(Number(e.target.value), 0, 100);
-                    setBankApyPct(next);
-                    logPolicyUpdate("Updated bank APY", operatingTarget, next, onchainApyPct);
-                  }}
-                  aria-label="Bank APY percent"
-                />
-                <span className="text-muted-foreground text-sm">%</span>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">On-chain target APY</label>
-              <div className="flex items-center gap-2">
-                <input
-                  className="w-full rounded-xl border px-3 py-2 text-sm"
-                  inputMode="decimal"
-                  value={onchainApyPct.toString()}
-                  onChange={(e) => {
-                    const next = clampNumber(Number(e.target.value), 0, 100);
-                    setOnchainApyPct(next);
-                    logPolicyUpdate("Updated on-chain APY", operatingTarget, bankApyPct, next);
-                  }}
-                  aria-label="On-chain APY percent"
-                />
-                <span className="text-muted-foreground text-sm">%</span>
-              </div>
-              <p className="text-xs text-muted-foreground">Delta: {formatPct(onchainApyPct - bankApyPct)}</p>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Simulation months</label>
-              <input
-                className="w-full rounded-xl border px-3 py-2 text-sm"
-                inputMode="numeric"
-                value={months.toString()}
-                onChange={(e) => setMonths(clampNumber(Number(e.target.value), 1, 24))}
-                aria-label="Simulation months"
-              />
-              <p className="text-xs text-muted-foreground">Cumulative yield (non-compounding).</p>
-            </div>
-
-            <div className="rounded-2xl border p-4 space-y-2">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-medium">Approval gate</p>
-                <StepTag stepLabel="Affects all sweeps" />
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {(["Operating", "Yield", "Payment"] as WalletKey[]).map((k) => (
+                    <div key={k} className="space-y-2">
+                      <label className="text-sm font-medium">{k} Balance</label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground">$</span>
+                        <input
+                          className="w-full rounded-xl border px-3 py-2 text-sm"
+                          inputMode="decimal"
+                          value={balances[k].toString()}
+                          onChange={(e) => onChangeBalance(k, e.target.value)}
+                          aria-label={`${k} balance`}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">Display: ${formatUSD(balances[k])}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
 
-              <div className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={requiresApproval}
-                  onChange={(e) => {
-                    setRequiresApproval(e.target.checked);
-                    setApproved(false);
-                  }}
-                />
-                <span>{requiresApproval ? "Require approval before allocating" : "No approval required"}</span>
-              </div>
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-muted-foreground">Policy + Rates</h3>
 
-              {requiresApproval && (
-                <Button
-                  variant={approved ? "outline" : "default"}
-                  onClick={() => setApproved(true)}
-                >
-                  {approved ? "Approved" : "Approve (Simulated)"}
-                </Button>
-              )}
-
-              <p className="text-xs text-muted-foreground">
-                When enabled, both Guided Allocate and Quick Sweep require approval.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* ACCOUNT INPUTS + POLICY (spotlight during Analyze) */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className={["rounded-2xl shadow-sm lg:col-span-2", spotlight.inputs ? "ring-2 ring-black" : ""].join(" ")}>
-          <CardContent className="p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Account Inputs</h2>
-              <StepTag stepLabel="Guided Step 2" />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {(["Operating", "Yield", "Payment"] as WalletKey[]).map((k) => (
-                <div key={k} className="space-y-2">
-                  <label className="text-sm font-medium">{k} Balance</label>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Operating Target</label>
                   <div className="flex items-center gap-2">
                     <span className="text-muted-foreground">$</span>
                     <input
                       className="w-full rounded-xl border px-3 py-2 text-sm"
                       inputMode="decimal"
-                      value={balances[k].toString()}
-                      onChange={(e) => onChangeBalance(k, e.target.value)}
-                      aria-label={`${k} balance`}
+                      value={operatingTarget.toString()}
+                      onChange={(e) => {
+                        const next = clampNumber(parseCurrencyInput(e.target.value), 0);
+                        setOperatingTarget(next);
+                        logPolicyUpdate("Updated operating target", next, bankApyPct, onchainApyPct);
+                      }}
+                      aria-label="Operating target"
                     />
                   </div>
-                  <p className="text-xs text-muted-foreground">Display: ${formatUSD(balances[k])}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Excess available to sweep: ${formatUSD(excessOperating)}
+                  </p>
                 </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
 
-        <Card className={["rounded-2xl shadow-sm", spotlight.analyze ? "ring-2 ring-black" : ""].join(" ")}>
-          <CardContent className="p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Policy Inputs</h2>
-              <StepTag stepLabel="Guided Step 2" />
-            </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Bank baseline APY</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      inputMode="decimal"
+                      value={bankApyPct.toString()}
+                      onChange={(e) => {
+                        const next = clampNumber(Number(e.target.value), 0, 100);
+                        setBankApyPct(next);
+                        logPolicyUpdate("Updated bank APY", operatingTarget, next, onchainApyPct);
+                      }}
+                      aria-label="Bank APY percent"
+                    />
+                    <span className="text-muted-foreground text-sm">%</span>
+                  </div>
+                </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Operating Target</label>
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">$</span>
-                <input
-                  className="w-full rounded-xl border px-3 py-2 text-sm"
-                  inputMode="decimal"
-                  value={operatingTarget.toString()}
-                  onChange={(e) => {
-                    const next = clampNumber(parseCurrencyInput(e.target.value), 0);
-                    setOperatingTarget(next);
-                    logPolicyUpdate("Updated operating target", next, bankApyPct, onchainApyPct);
-                  }}
-                  aria-label="Operating target"
-                />
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">On-chain target APY</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      className="w-full rounded-xl border px-3 py-2 text-sm"
+                      inputMode="decimal"
+                      value={onchainApyPct.toString()}
+                      onChange={(e) => {
+                        const next = clampNumber(Number(e.target.value), 0, 100);
+                        setOnchainApyPct(next);
+                        logPolicyUpdate("Updated on-chain APY", operatingTarget, bankApyPct, next);
+                      }}
+                      aria-label="On-chain APY percent"
+                    />
+                    <span className="text-muted-foreground text-sm">%</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Delta: {formatPct(onchainApyPct - bankApyPct)}</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Simulation months</label>
+                  <input
+                    className="w-full rounded-xl border px-3 py-2 text-sm"
+                    inputMode="numeric"
+                    value={months.toString()}
+                    onChange={(e) => setMonths(clampNumber(Number(e.target.value), 1, 24))}
+                    aria-label="Simulation months"
+                  />
+                  <p className="text-xs text-muted-foreground">Cumulative yield (non-compounding).</p>
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Excess available to sweep: ${formatUSD(excessOperating)}
-              </p>
             </div>
 
+            {/* Analysis output */}
             <div className="rounded-2xl bg-muted p-4 text-sm text-muted-foreground space-y-2">
               <div className="flex items-center justify-between">
                 <p className="font-medium text-foreground">Analysis output</p>
-                <StepTag stepLabel="Live" />
+                <StepTag label="Live" />
               </div>
               <p>{recommendation.rationale}</p>
               <p>
                 <span className="text-muted-foreground">Recommended sweep: </span>
                 <span className="font-semibold text-foreground">${formatUSD(recommendation.sweepAmount)}</span>
               </p>
-              <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setStep(2)}>
-                  Stay in Analyze
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Wallet overview (still useful during Analyze) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {(["Operating", "Yield", "Payment"] as WalletKey[]).map((name) => (
+            <Card key={name} className="rounded-2xl shadow-sm">
+              <CardContent className="p-6">
+                <h3 className="text-lg font-semibold">{name} Account</h3>
+                <p className="text-2xl mt-3">${formatUSD(balances[name])}</p>
+                {name === "Operating" && (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Target: ${formatUSD(operatingTarget)} · Excess: ${formatUSD(excessOperating)}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </section>
+
+      {/* STEP 3: ALLOCATE */}
+      <section>
+        <Card className={["rounded-2xl shadow-sm", step === 3 ? "ring-2 ring-black" : ""].join(" ")}>
+          <CardContent className="p-6 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Step 3 — Allocate</h2>
+              <StepTag label="Guided" />
+            </div>
+
+            <p className="text-sm text-muted-foreground">
+              Apply controls (optional approval) and execute the recommended sweep. This updates balances and writes an audit event.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-2xl border p-4">
+                <p className="text-xs text-muted-foreground">Recommended sweep</p>
+                <p className="text-xl font-semibold mt-1">${formatUSD(recommendation.sweepAmount)}</p>
+                <p className="text-xs text-muted-foreground mt-1">Operating → Yield</p>
+              </div>
+
+              <div className="rounded-2xl border p-4 space-y-2">
+                <p className="text-sm font-medium">Controls</p>
+
+                <div className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={requiresApproval}
+                    onChange={(e) => {
+                      setRequiresApproval(e.target.checked);
+                      setApproved(false);
+                    }}
+                  />
+                  <span>{requiresApproval ? "Require approval before allocating" : "No approval required"}</span>
+                </div>
+
+                {requiresApproval && (
+                  <Button
+                    variant={approved ? "outline" : "default"}
+                    onClick={() => setApproved(true)}
+                  >
+                    {approved ? "Approved" : "Approve (Simulated)"}
+                  </Button>
+                )}
+
+                <p className="text-xs text-muted-foreground">
+                  When enabled, approval applies to all sweep actions.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border p-4 space-y-2">
+                <p className="text-sm font-medium">Execute</p>
+
+                <Button
+                  onClick={() => executeSweep("Guided")}
+                  disabled={!canExecuteSweep}
+                  title={
+                    !canExecuteSweep
+                      ? connectionMode === "NotConnected"
+                        ? "Connect first"
+                        : requiresApproval && !approved
+                        ? "Approve first"
+                        : "No sweep available"
+                      : undefined
+                  }
+                >
+                  Execute Sweep
                 </Button>
-                <Button onClick={() => setStep(3)}>Go to Allocate</Button>
+
+                <Button
+                  variant="outline"
+                  onClick={() => executeSweep("Quick")}
+                  disabled={!canExecuteSweep}
+                  title={
+                    !canExecuteSweep
+                      ? connectionMode === "NotConnected"
+                        ? "Connect first"
+                        : requiresApproval && !approved
+                        ? "Approve first"
+                        : "No sweep available"
+                      : undefined
+                  }
+                >
+                  Quick Sweep
+                </Button>
+
+                <p className="text-xs text-muted-foreground">
+                  Both buttons produce the same ledger movement; the audit log records the path.
+                </p>
               </div>
             </div>
+
+            {lastSweep && (
+              <div className="rounded-2xl bg-muted p-4 text-sm text-muted-foreground">
+                Last sweep ({lastSweep.path}): <span className="font-semibold text-foreground">${formatUSD(lastSweep.sweptAmount)}</span>{" "}
+                at {new Date(lastSweep.timestamp).toLocaleTimeString()}.
+              </div>
+            )}
           </CardContent>
         </Card>
       </section>
 
-      {/* WALLET OVERVIEW (always live) */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {(["Operating", "Yield", "Payment"] as WalletKey[]).map((name) => (
-          <Card key={name} className="rounded-2xl shadow-sm">
-            <CardContent className="p-6">
-              <h2 className="text-lg font-semibold">{name} Account</h2>
-              <p className="text-2xl mt-3">${formatUSD(balances[name])}</p>
-              {name === "Operating" && (
-                <p className="text-xs text-muted-foreground mt-2">
-                  Target: ${formatUSD(operatingTarget)} · Excess: ${formatUSD(excessOperating)}
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </section>
-
-      {/* YIELD SIMULATION (spotlight during Monitor) */}
-      <section>
-        <Card className={["rounded-2xl shadow-sm", spotlight.chart ? "ring-2 ring-black" : ""].join(" ")}>
+      {/* STEP 4: MONITOR (chart + audit) */}
+      <section className="space-y-6">
+        <Card className={["rounded-2xl shadow-sm", step === 4 ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="flex items-center gap-2">
-                  <h2 className="text-lg font-semibold">Yield Delta Simulation</h2>
-                  <StepTag stepLabel="Guided Step 4" />
+                  <h2 className="text-lg font-semibold">Step 4 — Monitor</h2>
+                  <StepTag label="Guided" />
                 </div>
                 <p className="text-sm text-muted-foreground mt-1">
-                  Cumulative yield on Yield balance (${formatUSD(balances.Yield)}) over {months} months.
+                  Track outcomes over time and export an audit trail of actions taken during the session.
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Bank: {formatPct(bankApyPct)} APY · On-chain: {formatPct(onchainApyPct)} APY
+                  Bank: {formatPct(bankApyPct)} APY · On-chain: {formatPct(onchainApyPct)} APY · Window: {months} months
                 </p>
               </div>
 
@@ -657,91 +634,12 @@ export default function TreasuryDashboard() {
             </div>
           </CardContent>
         </Card>
-      </section>
 
-      {/* ALLOCATION ACTIONS (spotlight during Allocate) */}
-      <section>
-        <Card className={["rounded-2xl shadow-sm", spotlight.allocate ? "ring-2 ring-black" : ""].join(" ")}>
-          <CardContent className="p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-semibold">Allocation</h2>
-                <StepTag stepLabel="Guided Step 3" />
-              </div>
-              <p className="text-muted-foreground mt-1">
-                Execute the recommended sweep from Operating into Yield. This updates balances and writes an audit event.
-              </p>
-
-              <p className="text-sm mt-3">
-                <span className="text-muted-foreground">Recommended sweep: </span>
-                <span className="font-semibold">${formatUSD(recommendation.sweepAmount)}</span>
-              </p>
-
-              <div className="mt-2 text-xs text-muted-foreground">
-                {connectionMode === "NotConnected" ? "Connect to enable allocations." : null}
-                {connectionMode !== "NotConnected" && requiresApproval && !approved ? " Approval required to execute." : null}
-                {connectionMode !== "NotConnected" && (!requiresApproval || approved) ? " Ready to execute." : null}
-              </div>
-
-              {lastSweep && (
-                <p className="text-xs text-muted-foreground mt-2">
-                  Last sweep ({lastSweep.path}): ${formatUSD(lastSweep.sweptAmount)} ·{" "}
-                  {new Date(lastSweep.timestamp).toLocaleTimeString()}
-                </p>
-              )}
-            </div>
-
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setStep(3)}>
-                Guided Allocate
-              </Button>
-              <Button
-                onClick={() => executeSweep("Quick")}
-                disabled={!canExecuteSweep}
-                title={
-                  !canExecuteSweep
-                    ? connectionMode === "NotConnected"
-                      ? "Connect first"
-                      : requiresApproval && !approved
-                      ? "Approve first"
-                      : "No sweep available"
-                    : undefined
-                }
-              >
-                Quick Sweep
-              </Button>
-              <Button
-                onClick={() => executeSweep("Guided")}
-                disabled={!canExecuteSweep}
-                title={
-                  !canExecuteSweep
-                    ? connectionMode === "NotConnected"
-                      ? "Connect first"
-                      : requiresApproval && !approved
-                      ? "Approve first"
-                      : "No sweep available"
-                    : undefined
-                }
-              >
-                Execute (Guided)
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* MONITOR (spotlight during Monitor) */}
-      <section>
-        <Card className={["rounded-2xl shadow-sm", spotlight.monitor ? "ring-2 ring-black" : ""].join(" ")}>
+        <Card className={["rounded-2xl shadow-sm", step === 4 ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6 space-y-4">
             <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">Monitor</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Review actions and export an audit log. This is the “portfolio proof” that the system is traceable.
-                </p>
-              </div>
-              <StepTag stepLabel="Guided Step 4" />
+              <h3 className="text-lg font-semibold">Audit Log</h3>
+              <StepTag label="Exportable" />
             </div>
 
             <div className="flex flex-wrap gap-2">
@@ -750,9 +648,6 @@ export default function TreasuryDashboard() {
               </Button>
               <Button variant="outline" onClick={() => setEvents([])} disabled={events.length === 0}>
                 Clear Events
-              </Button>
-              <Button variant="outline" onClick={() => setStep(2)}>
-                Back to Analyze
               </Button>
             </div>
 
@@ -787,13 +682,13 @@ export default function TreasuryDashboard() {
         </Card>
       </section>
 
-      {/* WHY THIS EXISTS (kept; always useful) */}
+      {/* WHY THIS EXISTS */}
       <section>
         <Card className="rounded-2xl shadow-sm">
           <CardContent className="p-6 space-y-4">
             <h2 className="text-lg font-semibold">Why this product exists</h2>
             <p className="text-sm text-muted-foreground">
-              A finance-first treasury workflow: automate idle cash allocation while keeping controls and traceability.
+              A finance-first workflow: automate idle cash allocation while keeping controls and traceability.
             </p>
 
             <div className="overflow-hidden rounded-2xl border">
@@ -824,7 +719,7 @@ export default function TreasuryDashboard() {
       <footer className="pt-2 pb-8 text-xs text-muted-foreground">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <div>Stablecoin Treasury OS — interactive portfolio demo</div>
-          <div>Try: Connect → tweak target/rates → approve → execute sweep → export audit CSV</div>
+          <div>Flow: Step 1 Connect → Step 2 Analyze → Step 3 Allocate → Step 4 Monitor</div>
         </div>
       </footer>
     </main>

@@ -19,7 +19,8 @@ type TreasuryEvent =
       onchainApyPct: number;
       note: string;
     }
-  | { type: "SWEEP_EXECUTED"; ts: number; amount: number };
+  | { type: "BALANCE_UPDATED"; ts: number; account: WalletKey; value: number }
+  | { type: "SWEEP_EXECUTED"; ts: number; amount: number; path: "Guided" | "Quick" };
 
 function clampNumber(n: number, min = 0, max = Number.MAX_SAFE_INTEGER) {
   if (Number.isNaN(n)) return min;
@@ -70,6 +71,36 @@ function StepPill({ active, children }: { active: boolean; children: React.React
   );
 }
 
+function StepTag({ stepLabel }: { stepLabel: string }) {
+  return <span className="text-xs rounded-full bg-muted px-2 py-1 text-muted-foreground">{stepLabel}</span>;
+}
+
+function SpotlightCard({
+  active,
+  titleRight,
+  children,
+}: {
+  active: boolean;
+  titleRight?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card
+      className={[
+        "rounded-2xl shadow-sm transition",
+        active ? "ring-2 ring-black" : "",
+      ].join(" ")}
+    >
+      <CardContent className="p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">{children}</div>
+          {titleRight ? <div className="shrink-0">{titleRight}</div> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function TreasuryDashboard() {
   // Balances (defaults)
   const [balances, setBalances] = useState<Record<WalletKey, number>>({
@@ -81,26 +112,27 @@ export default function TreasuryDashboard() {
   // Policy inputs
   const [operatingTarget, setOperatingTarget] = useState<number>(50000);
 
-  // Bank baseline vs on-chain target (for the “delta” story)
+  // Bank baseline vs on-chain target (for “delta”)
   const [bankApyPct, setBankApyPct] = useState<number>(0.2);
   const [onchainApyPct, setOnchainApyPct] = useState<number>(5.0);
 
   // Simulation window
   const [months, setMonths] = useState<number>(6);
 
-  // Guided demo state
+  // Guided demo
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("NotConnected");
 
-  // Controls / approvals
+  // Approval gate
   const [requiresApproval, setRequiresApproval] = useState<boolean>(true);
   const [approved, setApproved] = useState<boolean>(false);
 
-  // Event/audit trail
+  // Audit trail
   const [events, setEvents] = useState<TreasuryEvent[]>([]);
 
-  // For "Simulate Sweep" summary
-  const [lastSweep, setLastSweep] = useState<{ sweptAmount: number; timestamp: number } | null>(null);
+  const [lastSweep, setLastSweep] = useState<{ sweptAmount: number; timestamp: number; path: "Guided" | "Quick" } | null>(
+    null
+  );
 
   const totalCash = useMemo(
     () => balances.Operating + balances.Yield + balances.Payment,
@@ -123,14 +155,13 @@ export default function TreasuryDashboard() {
 
   const monthlyUplift = useMemo(() => annualUplift / 12, [annualUplift]);
 
-  // Analyze step recommendation (simple v1: sweep excess Operating into Yield)
+  // Analyze recommendation (v1: sweep excess Operating into Yield)
   const recommendation = useMemo(() => {
     const sweepAmount = excessOperating;
     const rationale =
       sweepAmount > 0
         ? `Operating exceeds the target by $${formatUSD(sweepAmount)}. Recommendation: sweep the excess into Yield.`
         : `Operating is at or below the target. Recommendation: no sweep.`;
-
     return { sweepAmount, rationale };
   }, [excessOperating]);
 
@@ -151,6 +182,7 @@ export default function TreasuryDashboard() {
     });
   }, [balances.Yield, onchainMonthlyRate, bankMonthlyRate, months]);
 
+  // Step gating (applies to Next + guided actions)
   const canContinue = useMemo(() => {
     if (step === 1) return connectionMode !== "NotConnected";
     if (step === 2) return true;
@@ -158,12 +190,24 @@ export default function TreasuryDashboard() {
     return true;
   }, [step, connectionMode, requiresApproval, approved]);
 
-  const onChangeBalance = (key: WalletKey, raw: string) => {
-    const next = clampNumber(parseCurrencyInput(raw), 0);
-    setBalances((prev) => ({ ...prev, [key]: next }));
-  };
+  // Spotlight mapping: guided step highlights the real feature sections
+  const spotlight = useMemo(() => {
+    return {
+      connect: step === 1,
+      inputs: step === 2,
+      analyze: step === 2,
+      allocate: step === 3,
+      chart: step === 4,
+      monitor: step === 4,
+    };
+  }, [step]);
 
-  const logPolicyUpdate = (note: string, nextOperatingTarget = operatingTarget, nextBank = bankApyPct, nextOnchain = onchainApyPct) => {
+  const logPolicyUpdate = (
+    note: string,
+    nextOperatingTarget = operatingTarget,
+    nextBank = bankApyPct,
+    nextOnchain = onchainApyPct
+  ) => {
     const ts = Date.now();
     setEvents((prev) => [
       { type: "POLICY_UPDATED", ts, operatingTarget: nextOperatingTarget, bankApyPct: nextBank, onchainApyPct: nextOnchain, note },
@@ -171,21 +215,43 @@ export default function TreasuryDashboard() {
     ]);
   };
 
-  const handleSimulateSweep = () => {
-    // Must be connected (makes Step 1 meaningful)
-    if (connectionMode === "NotConnected") {
-      setStep(1);
-      return;
-    }
+  const logBalanceUpdate = (account: WalletKey, value: number) => {
+    const ts = Date.now();
+    setEvents((prev) => [{ type: "BALANCE_UPDATED", ts, account, value }, ...prev]);
+  };
 
-    // Approval gate (makes Step 3 meaningful)
-    if (requiresApproval && !approved) return;
+  const onChangeBalance = (key: WalletKey, raw: string) => {
+    const next = clampNumber(parseCurrencyInput(raw), 0);
+    setBalances((prev) => {
+      const updated = { ...prev, [key]: next };
+      return updated;
+    });
+    logBalanceUpdate(key, next);
+  };
+
+  const connect = (mode: Exclude<ConnectionMode, "NotConnected">) => {
+    const ts = Date.now();
+    setConnectionMode(mode);
+    setEvents((prev) => [{ type: "CONNECTED", ts, mode }, ...prev]);
+  };
+
+  const canExecuteSweep = useMemo(() => {
+    // Connection is always required
+    if (connectionMode === "NotConnected") return false;
+
+    // If approval is enabled, require approval for ANY sweep execution (guided or quick)
+    if (requiresApproval && !approved) return false;
+
+    // Must have positive recommendation
+    if (recommendation.sweepAmount <= 0) return false;
+
+    return true;
+  }, [connectionMode, requiresApproval, approved, recommendation.sweepAmount]);
+
+  const executeSweep = (path: "Guided" | "Quick") => {
+    if (!canExecuteSweep) return;
 
     const sweep = recommendation.sweepAmount;
-    if (sweep <= 0) {
-      setLastSweep({ sweptAmount: 0, timestamp: Date.now() });
-      return;
-    }
 
     setBalances((prev) => ({
       ...prev,
@@ -194,11 +260,14 @@ export default function TreasuryDashboard() {
     }));
 
     const ts = Date.now();
-    setLastSweep({ sweptAmount: sweep, timestamp: ts });
-    setEvents((prev) => [{ type: "SWEEP_EXECUTED", ts, amount: sweep }, ...prev]);
+    setLastSweep({ sweptAmount: sweep, timestamp: ts, path });
+    setEvents((prev) => [{ type: "SWEEP_EXECUTED", ts, amount: sweep, path }, ...prev]);
 
-    setApproved(false); // reset for next run
-    setStep(4); // move to Monitor after execution
+    // reset approval after a “transaction”
+    setApproved(false);
+
+    // Guided flow advances to Monitor; quick sweep nudges toward Monitor as well
+    setStep(4);
   };
 
   const loadDemoScenario = () => {
@@ -215,6 +284,26 @@ export default function TreasuryDashboard() {
     setStep(1);
   };
 
+  const exportAudit = () => {
+    const rows: string[][] = [
+      ["timestamp", "time_local", "event", "details"],
+      ...events.map((e) => {
+        if (e.type === "CONNECTED") return [String(e.ts), fmtTime(e.ts), "CONNECTED", `mode=${e.mode}`];
+        if (e.type === "POLICY_UPDATED")
+          return [
+            String(e.ts),
+            fmtTime(e.ts),
+            "POLICY_UPDATED",
+            `target=$${formatUSD(e.operatingTarget)} bank=${e.bankApyPct}% onchain=${e.onchainApyPct}% note=${e.note}`,
+          ];
+        if (e.type === "BALANCE_UPDATED")
+          return [String(e.ts), fmtTime(e.ts), "BALANCE_UPDATED", `${e.account}=$${formatUSD(e.value)}`];
+        return [String(e.ts), fmtTime(e.ts), "SWEEP_EXECUTED", `amount=$${formatUSD(e.amount)} path=${e.path}`];
+      }),
+    ];
+    downloadCSV("treasury_audit_log.csv", rows);
+  };
+
   return (
     <main className="p-6 md:p-10 space-y-8 max-w-6xl mx-auto">
       {/* HERO */}
@@ -226,7 +315,7 @@ export default function TreasuryDashboard() {
               Earn more on idle cash · Automate treasury policies · Keep an audit trail
             </p>
             <p className="text-sm text-muted-foreground mt-2">
-              Portfolio demo: simulate how a finance team moves excess operating cash into a yield route with controls.
+              Interactive portfolio demo: adjust inputs, follow the guided flow, and export an audit log.
             </p>
           </div>
 
@@ -259,240 +348,59 @@ export default function TreasuryDashboard() {
         </div>
       </section>
 
-      {/* GUIDED DEMO PANEL (functional) */}
-      <section>
-        <Card className="rounded-2xl shadow-sm">
-          <CardContent className="p-6 space-y-4">
-            {step === 1 && (
-              <>
-                <h2 className="text-lg font-semibold">Connect</h2>
-                <p className="text-sm text-muted-foreground">
-                  Choose a connection mode. This demo simulates linking accounts and enabling treasury actions.
-                </p>
+      {/* CONNECT (spotlight) */}
+      <SpotlightCard
+        active={spotlight.connect}
+        titleRight={<StepTag stepLabel="Guided Step 1" />}
+      >
+        <div className="space-y-3">
+          <h2 className="text-lg font-semibold">Connect</h2>
+          <p className="text-sm text-muted-foreground">
+            Select a connection mode. Actions are disabled until connected to mirror real treasury permissions.
+          </p>
 
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant={connectionMode === "DemoBankFeed" ? "default" : "outline"}
-                    onClick={() => {
-                      const ts = Date.now();
-                      setConnectionMode("DemoBankFeed");
-                      setEvents((prev) => [{ type: "CONNECTED", ts, mode: "DemoBankFeed" }, ...prev]);
-                    }}
-                  >
-                    Connect Demo Bank Feed
-                  </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant={connectionMode === "DemoBankFeed" ? "default" : "outline"}
+              onClick={() => connect("DemoBankFeed")}
+            >
+              Connect Demo Bank Feed
+            </Button>
+            <Button
+              variant={connectionMode === "Wallet" ? "default" : "outline"}
+              onClick={() => connect("Wallet")}
+            >
+              Connect Wallet
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setConnectionMode("NotConnected")}
+              disabled={connectionMode === "NotConnected"}
+            >
+              Disconnect
+            </Button>
+          </div>
 
-                  <Button
-                    variant={connectionMode === "Wallet" ? "default" : "outline"}
-                    onClick={() => {
-                      const ts = Date.now();
-                      setConnectionMode("Wallet");
-                      setEvents((prev) => [{ type: "CONNECTED", ts, mode: "Wallet" }, ...prev]);
-                    }}
-                  >
-                    Connect Wallet
-                  </Button>
+          <div className="rounded-2xl border p-4 text-sm">
+            <span className="text-muted-foreground">Status: </span>
+            <span className="font-semibold">{connectionMode}</span>
+            <span className="text-muted-foreground">
+              {connectionMode === "NotConnected"
+                ? " — connect to enable allocations"
+                : " — allocations enabled"}
+            </span>
+          </div>
+        </div>
+      </SpotlightCard>
 
-                  <Button
-                    variant="outline"
-                    onClick={() => setConnectionMode("NotConnected")}
-                    disabled={connectionMode === "NotConnected"}
-                  >
-                    Disconnect
-                  </Button>
-                </div>
-
-                <div className="rounded-2xl border p-4 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <span className="text-muted-foreground">Status: </span>
-                      <span className="font-semibold">{connectionMode}</span>
-                    </div>
-                    <div className="text-muted-foreground">
-                      Tip: “Next” is disabled until you connect.
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {step === 2 && (
-              <>
-                <h2 className="text-lg font-semibold">Analyze</h2>
-                <p className="text-sm text-muted-foreground">
-                  The system identifies idle operating cash based on your target buffer and produces a sweep recommendation.
-                </p>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="rounded-2xl border p-4">
-                    <p className="text-xs text-muted-foreground">Operating balance</p>
-                    <p className="text-xl font-semibold mt-1">${formatUSD(balances.Operating)}</p>
-                  </div>
-                  <div className="rounded-2xl border p-4">
-                    <p className="text-xs text-muted-foreground">Operating target</p>
-                    <p className="text-xl font-semibold mt-1">${formatUSD(operatingTarget)}</p>
-                  </div>
-                  <div className="rounded-2xl border p-4">
-                    <p className="text-xs text-muted-foreground">Recommended sweep</p>
-                    <p className="text-xl font-semibold mt-1">${formatUSD(recommendation.sweepAmount)}</p>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl bg-muted p-4 text-sm text-muted-foreground">
-                  <span className="font-medium text-foreground">Recommendation:</span> {recommendation.rationale}
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" onClick={() => setStep(3)}>
-                    Proceed to Allocate
-                  </Button>
-                </div>
-              </>
-            )}
-
-            {step === 3 && (
-              <>
-                <h2 className="text-lg font-semibold">Allocate</h2>
-                <p className="text-sm text-muted-foreground">
-                  Execute the recommended sweep (simulated). Optional approval gate mirrors finance controls.
-                </p>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="rounded-2xl border p-4">
-                    <p className="text-xs text-muted-foreground">Sweep amount</p>
-                    <p className="text-xl font-semibold mt-1">${formatUSD(recommendation.sweepAmount)}</p>
-                    <p className="text-xs text-muted-foreground mt-1">Operating → Yield</p>
-                  </div>
-
-                  <div className="rounded-2xl border p-4">
-                    <p className="text-xs text-muted-foreground">Approval</p>
-                    <div className="mt-2 flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={requiresApproval}
-                        onChange={(e) => {
-                          setRequiresApproval(e.target.checked);
-                          setApproved(false);
-                        }}
-                      />
-                      <span>{requiresApproval ? "Require approval (simulated)" : "No approval required"}</span>
-                    </div>
-
-                    {requiresApproval && (
-                      <Button
-                        className="mt-3"
-                        variant={approved ? "outline" : "default"}
-                        onClick={() => setApproved(true)}
-                      >
-                        {approved ? "Approved" : "Approve (Simulated)"}
-                      </Button>
-                    )}
-
-                    <p className="text-xs text-muted-foreground mt-3">
-                      “Next” is disabled until approved (if enabled).
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border p-4">
-                    <p className="text-xs text-muted-foreground">Action</p>
-                    <Button
-                      className="mt-2 w-full"
-                      onClick={handleSimulateSweep}
-                      disabled={
-                        recommendation.sweepAmount <= 0 || (requiresApproval && !approved) || connectionMode === "NotConnected"
-                      }
-                    >
-                      Execute Sweep (Simulated)
-                    </Button>
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Updates balances + writes an audit event.
-                    </p>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {step === 4 && (
-              <>
-                <h2 className="text-lg font-semibold">Monitor</h2>
-                <p className="text-sm text-muted-foreground">
-                  Review what happened and export an audit log. This is the “CFO-ready” proof: outcomes + traceability.
-                </p>
-
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      const rows: string[][] = [
-                        ["timestamp", "time_local", "event", "details"],
-                        ...events.map((e) => {
-                          if (e.type === "CONNECTED") {
-                            return [String(e.ts), fmtTime(e.ts), "CONNECTED", `mode=${e.mode}`];
-                          }
-                          if (e.type === "POLICY_UPDATED") {
-                            return [
-                              String(e.ts),
-                              fmtTime(e.ts),
-                              "POLICY_UPDATED",
-                              `target=$${formatUSD(e.operatingTarget)} bank=${e.bankApyPct}% onchain=${e.onchainApyPct}% note=${e.note}`,
-                            ];
-                          }
-                          return [String(e.ts), fmtTime(e.ts), "SWEEP_EXECUTED", `amount=$${formatUSD(e.amount)}`];
-                        }),
-                      ];
-                      downloadCSV("treasury_audit_log.csv", rows);
-                    }}
-                    disabled={events.length === 0}
-                  >
-                    Export Audit CSV
-                  </Button>
-
-                  <Button variant="outline" onClick={() => setEvents([])} disabled={events.length === 0}>
-                    Clear Events
-                  </Button>
-
-                  <Button variant="outline" onClick={() => setStep(2)}>
-                    Re-run Analysis
-                  </Button>
-                </div>
-
-                <div className="rounded-2xl border overflow-hidden">
-                  <div className="grid grid-cols-3 bg-muted px-4 py-2 text-xs font-semibold text-muted-foreground">
-                    <div>Time</div>
-                    <div>Event</div>
-                    <div>Details</div>
-                  </div>
-
-                  {events.length === 0 ? (
-                    <div className="px-4 py-3 text-sm text-muted-foreground">
-                      No events yet. Execute a sweep to generate an audit trail.
-                    </div>
-                  ) : (
-                    events.slice(0, 12).map((e, idx) => (
-                      <div key={idx} className="grid grid-cols-3 px-4 py-3 text-sm border-t">
-                        <div className="text-muted-foreground">{fmtTime(e.ts)}</div>
-                        <div className="font-medium">{e.type}</div>
-                        <div className="text-muted-foreground">
-                          {e.type === "CONNECTED" && `mode=${e.mode}`}
-                          {e.type === "POLICY_UPDATED" &&
-                            `target=$${formatUSD(e.operatingTarget)} bank=${e.bankApyPct}% onchain=${e.onchainApyPct}% (${e.note})`}
-                          {e.type === "SWEEP_EXECUTED" && `amount=$${formatUSD(e.amount)}`}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* QUANTIFIED VALUE */}
+      {/* SNAPSHOT (always valuable; reacts to inputs + policy) */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="rounded-2xl shadow-sm lg:col-span-2">
           <CardContent className="p-6 space-y-4">
-            <h2 className="text-lg font-semibold">Treasury Snapshot</h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Treasury Snapshot</h2>
+              <StepTag stepLabel={step <= 2 ? "Driven by Analyze" : "Live metrics"} />
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="rounded-2xl border p-4">
@@ -504,7 +412,7 @@ export default function TreasuryDashboard() {
               <div className="rounded-2xl border p-4">
                 <p className="text-xs text-muted-foreground">Yield principal</p>
                 <p className="text-2xl font-semibold mt-1">${formatUSD(balances.Yield)}</p>
-                <p className="text-xs text-muted-foreground mt-1">Used for delta simulation</p>
+                <p className="text-xs text-muted-foreground mt-1">Basis for uplift & chart</p>
               </div>
 
               <div className="rounded-2xl border p-4">
@@ -517,17 +425,18 @@ export default function TreasuryDashboard() {
             </div>
 
             <div className="rounded-2xl bg-muted p-4 text-sm text-muted-foreground">
-              This demo focuses on finance outcomes: <span className="font-medium text-foreground">policy</span> →
-              <span className="font-medium text-foreground"> allocation</span> →
-              <span className="font-medium text-foreground"> measurable uplift</span> + an
-              <span className="font-medium text-foreground"> audit trail</span>.
+              Adjust balances, targets, and rates — the snapshot, analysis, chart, and allocation recommendation update instantly.
             </div>
           </CardContent>
         </Card>
 
-        <Card className="rounded-2xl shadow-sm">
+        {/* Rates & approval (directly affects allocation everywhere) */}
+        <Card className={["rounded-2xl shadow-sm", spotlight.inputs ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6 space-y-4">
-            <h2 className="text-lg font-semibold">Rates & Window</h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Rates & Controls</h2>
+              <StepTag stepLabel="Guided Step 2–3" />
+            </div>
 
             <div className="space-y-2">
               <label className="text-sm font-medium">Bank baseline APY</label>
@@ -575,17 +484,52 @@ export default function TreasuryDashboard() {
                 onChange={(e) => setMonths(clampNumber(Number(e.target.value), 1, 24))}
                 aria-label="Simulation months"
               />
-              <p className="text-xs text-muted-foreground">Simple cumulative yield (non-compounding).</p>
+              <p className="text-xs text-muted-foreground">Cumulative yield (non-compounding).</p>
+            </div>
+
+            <div className="rounded-2xl border p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">Approval gate</p>
+                <StepTag stepLabel="Affects all sweeps" />
+              </div>
+
+              <div className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={requiresApproval}
+                  onChange={(e) => {
+                    setRequiresApproval(e.target.checked);
+                    setApproved(false);
+                  }}
+                />
+                <span>{requiresApproval ? "Require approval before allocating" : "No approval required"}</span>
+              </div>
+
+              {requiresApproval && (
+                <Button
+                  variant={approved ? "outline" : "default"}
+                  onClick={() => setApproved(true)}
+                >
+                  {approved ? "Approved" : "Approve (Simulated)"}
+                </Button>
+              )}
+
+              <p className="text-xs text-muted-foreground">
+                When enabled, both Guided Allocate and Quick Sweep require approval.
+              </p>
             </div>
           </CardContent>
         </Card>
       </section>
 
-      {/* INPUTS */}
+      {/* ACCOUNT INPUTS + POLICY (spotlight during Analyze) */}
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className="rounded-2xl shadow-sm lg:col-span-2">
+        <Card className={["rounded-2xl shadow-sm lg:col-span-2", spotlight.inputs ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6 space-y-4">
-            <h2 className="text-lg font-semibold">Account Inputs</h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Account Inputs</h2>
+              <StepTag stepLabel="Guided Step 2" />
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {(["Operating", "Yield", "Payment"] as WalletKey[]).map((k) => (
@@ -608,9 +552,12 @@ export default function TreasuryDashboard() {
           </CardContent>
         </Card>
 
-        <Card className="rounded-2xl shadow-sm">
+        <Card className={["rounded-2xl shadow-sm", spotlight.analyze ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6 space-y-4">
-            <h2 className="text-lg font-semibold">Policy Inputs</h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Policy Inputs</h2>
+              <StepTag stepLabel="Guided Step 2" />
+            </div>
 
             <div className="space-y-2">
               <label className="text-sm font-medium">Operating Target</label>
@@ -633,23 +580,28 @@ export default function TreasuryDashboard() {
               </p>
             </div>
 
-            <div className="rounded-2xl bg-muted p-4 text-sm">
-              <p className="font-medium">Quick flow controls</p>
-              <p className="text-muted-foreground mt-1">
-                Adjust policy → Analyze the recommendation → Allocate with approvals → Monitor with audit log.
+            <div className="rounded-2xl bg-muted p-4 text-sm text-muted-foreground space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="font-medium text-foreground">Analysis output</p>
+                <StepTag stepLabel="Live" />
+              </div>
+              <p>{recommendation.rationale}</p>
+              <p>
+                <span className="text-muted-foreground">Recommended sweep: </span>
+                <span className="font-semibold text-foreground">${formatUSD(recommendation.sweepAmount)}</span>
               </p>
-              <div className="mt-3 flex gap-2">
+              <div className="flex gap-2">
                 <Button variant="outline" onClick={() => setStep(2)}>
-                  Analyze
+                  Stay in Analyze
                 </Button>
-                <Button onClick={() => setStep(3)}>Allocate</Button>
+                <Button onClick={() => setStep(3)}>Go to Allocate</Button>
               </div>
             </div>
           </CardContent>
         </Card>
       </section>
 
-      {/* WALLET OVERVIEW */}
+      {/* WALLET OVERVIEW (always live) */}
       <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {(["Operating", "Yield", "Payment"] as WalletKey[]).map((name) => (
           <Card key={name} className="rounded-2xl shadow-sm">
@@ -666,13 +618,16 @@ export default function TreasuryDashboard() {
         ))}
       </section>
 
-      {/* YIELD SIMULATION */}
+      {/* YIELD SIMULATION (spotlight during Monitor) */}
       <section>
-        <Card className="rounded-2xl shadow-sm">
+        <Card className={["rounded-2xl shadow-sm", spotlight.chart ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-lg font-semibold">Yield Delta Simulation</h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-lg font-semibold">Yield Delta Simulation</h2>
+                  <StepTag stepLabel="Guided Step 4" />
+                </div>
                 <p className="text-sm text-muted-foreground mt-1">
                   Cumulative yield on Yield balance (${formatUSD(balances.Yield)}) over {months} months.
                 </p>
@@ -704,42 +659,135 @@ export default function TreasuryDashboard() {
         </Card>
       </section>
 
-      {/* SWEEP ACTION */}
+      {/* ALLOCATION ACTIONS (spotlight during Allocate) */}
       <section>
-        <Card className="rounded-2xl shadow-sm">
+        <Card className={["rounded-2xl shadow-sm", spotlight.allocate ? "ring-2 ring-black" : ""].join(" ")}>
           <CardContent className="p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold">Automated Allocation Policy</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-semibold">Allocation</h2>
+                <StepTag stepLabel="Guided Step 3" />
+              </div>
               <p className="text-muted-foreground mt-1">
-                When Operating exceeds the target, sweep the excess into Yield (simulated). Approval gating is handled in
-                the guided Allocate step.
+                Execute the recommended sweep from Operating into Yield. This updates balances and writes an audit event.
               </p>
 
               <p className="text-sm mt-3">
-                <span className="text-muted-foreground">Current excess: </span>
-                <span className="font-semibold">${formatUSD(excessOperating)}</span>
+                <span className="text-muted-foreground">Recommended sweep: </span>
+                <span className="font-semibold">${formatUSD(recommendation.sweepAmount)}</span>
               </p>
+
+              <div className="mt-2 text-xs text-muted-foreground">
+                {connectionMode === "NotConnected" ? "Connect to enable allocations." : null}
+                {connectionMode !== "NotConnected" && requiresApproval && !approved ? " Approval required to execute." : null}
+                {connectionMode !== "NotConnected" && (!requiresApproval || approved) ? " Ready to execute." : null}
+              </div>
 
               {lastSweep && (
                 <p className="text-xs text-muted-foreground mt-2">
-                  Last sweep: ${formatUSD(lastSweep.sweptAmount)} · {new Date(lastSweep.timestamp).toLocaleTimeString()}
+                  Last sweep ({lastSweep.path}): ${formatUSD(lastSweep.sweptAmount)} ·{" "}
+                  {new Date(lastSweep.timestamp).toLocaleTimeString()}
                 </p>
               )}
             </div>
 
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setStep(3)}>
-                Allocate (Guided)
+                Guided Allocate
               </Button>
-              <Button onClick={handleSimulateSweep} disabled={connectionMode === "NotConnected"}>
+              <Button
+                onClick={() => executeSweep("Quick")}
+                disabled={!canExecuteSweep}
+                title={
+                  !canExecuteSweep
+                    ? connectionMode === "NotConnected"
+                      ? "Connect first"
+                      : requiresApproval && !approved
+                      ? "Approve first"
+                      : "No sweep available"
+                    : undefined
+                }
+              >
                 Quick Sweep
+              </Button>
+              <Button
+                onClick={() => executeSweep("Guided")}
+                disabled={!canExecuteSweep}
+                title={
+                  !canExecuteSweep
+                    ? connectionMode === "NotConnected"
+                      ? "Connect first"
+                      : requiresApproval && !approved
+                      ? "Approve first"
+                      : "No sweep available"
+                    : undefined
+                }
+              >
+                Execute (Guided)
               </Button>
             </div>
           </CardContent>
         </Card>
       </section>
 
-      {/* COMPARISON */}
+      {/* MONITOR (spotlight during Monitor) */}
+      <section>
+        <Card className={["rounded-2xl shadow-sm", spotlight.monitor ? "ring-2 ring-black" : ""].join(" ")}>
+          <CardContent className="p-6 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Monitor</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Review actions and export an audit log. This is the “portfolio proof” that the system is traceable.
+                </p>
+              </div>
+              <StepTag stepLabel="Guided Step 4" />
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={exportAudit} disabled={events.length === 0}>
+                Export Audit CSV
+              </Button>
+              <Button variant="outline" onClick={() => setEvents([])} disabled={events.length === 0}>
+                Clear Events
+              </Button>
+              <Button variant="outline" onClick={() => setStep(2)}>
+                Back to Analyze
+              </Button>
+            </div>
+
+            <div className="rounded-2xl border overflow-hidden">
+              <div className="grid grid-cols-3 bg-muted px-4 py-2 text-xs font-semibold text-muted-foreground">
+                <div>Time</div>
+                <div>Event</div>
+                <div>Details</div>
+              </div>
+
+              {events.length === 0 ? (
+                <div className="px-4 py-3 text-sm text-muted-foreground">
+                  No events yet. Try: connect → change a policy → execute a sweep.
+                </div>
+              ) : (
+                events.slice(0, 14).map((e, idx) => (
+                  <div key={idx} className="grid grid-cols-3 px-4 py-3 text-sm border-t">
+                    <div className="text-muted-foreground">{fmtTime(e.ts)}</div>
+                    <div className="font-medium">{e.type}</div>
+                    <div className="text-muted-foreground">
+                      {e.type === "CONNECTED" && `mode=${e.mode}`}
+                      {e.type === "POLICY_UPDATED" &&
+                        `target=$${formatUSD(e.operatingTarget)} bank=${e.bankApyPct}% onchain=${e.onchainApyPct}% (${e.note})`}
+                      {e.type === "BALANCE_UPDATED" && `${e.account}=$${formatUSD(e.value)}`}
+                      {e.type === "SWEEP_EXECUTED" && `amount=$${formatUSD(e.amount)} path=${e.path}`}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* WHY THIS EXISTS (kept; always useful) */}
       <section>
         <Card className="rounded-2xl shadow-sm">
           <CardContent className="p-6 space-y-4">
@@ -776,7 +824,7 @@ export default function TreasuryDashboard() {
       <footer className="pt-2 pb-8 text-xs text-muted-foreground">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <div>Stablecoin Treasury OS — interactive portfolio demo</div>
-          <div>Try: Connect → set a target → Analyze → Approve → Execute → Export audit CSV</div>
+          <div>Try: Connect → tweak target/rates → approve → execute sweep → export audit CSV</div>
         </div>
       </footer>
     </main>

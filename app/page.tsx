@@ -77,7 +77,7 @@ function StepTag({ label }: { label: string }) {
 export default function TreasuryDashboard() {
   // Balances
   const [balances, setBalances] = useState<Record<WalletKey, number>>({
-    Operating: 50000,
+    Operating: 200000,
     Yield: 250000,
     Payment: 20000,
   });

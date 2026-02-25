@@ -249,7 +249,7 @@ export default function TreasuryDashboard() {
               Earn more on idle cash · Automate treasury policies · Keep an audit trail
             </p>
             <p className="text-sm text-muted-foreground mt-2">
-              Scroll down to progress through the guided flow (Steps 1–4). Everything stays interactive and updates live.
+              Scroll down to progress through the guided flow (Steps 1–4).
             </p>
           </div>
 
